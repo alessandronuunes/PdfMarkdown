@@ -4,12 +4,16 @@
   "description": "🔄 **Conversor gratuito e local de PDF para Markdown** utilizando PyMuPDF",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "node test-basic.js",
+    "test:basic": "node test-converter.js storage/*.pdf",
+    "test:ai": "node hybrid-converter.js storage/*.pdf"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.102.0",
+    "axios": "^1.17.0",
     "dotenv": "^17.4.2"
   }
 }

@@ -4,6 +4,8 @@ require('dotenv').config();
 const { exec } = require('child_process');
 const fs = require('fs');
 const path = require('path');
+const axios = require('axios');
+const Anthropic = require('@anthropic-ai/sdk');
 
 // Configuração - escolha o método
 const CONFIG = {
@@ -122,10 +124,15 @@ RESPONDA APENAS COM O MARKDOWN FORMATADO:`;
 
 async function processWithClaude(extractedText) {
     if (!CONFIG.anthropic_key) {
-        throw new Error('ANTHROPIC_API_KEY não configurada');
+        throw new Error('❌ ANTHROPIC_API_KEY não configurada! Configure no arquivo .env');
     }
 
-    const prompt = `Converta este texto de PDF para Markdown bem estruturado:
+    try {
+        const anthropic = new Anthropic({
+            apiKey: CONFIG.anthropic_key,
+        });
+
+        const prompt = `Converta este texto de PDF para Markdown bem estruturado:
 
 ${extractedText.slice(0, 100000)}
 
@@ -137,39 +144,25 @@ Instruções:
 5. Remova elementos desnecessários
 6. Mantenha estrutura lógica`;
 
-    const requestData = {
-        model: "claude-sonnet-4-6",
-        max_tokens: 4000,
-        messages: [
-            {
-                role: "user",
+        const response = await anthropic.messages.create({
+            model: 'claude-3-sonnet-20240229',
+            max_tokens: 4000,
+            messages: [{
+                role: 'user',
                 content: prompt
-            }
-        ]
-    };
-
-    const curlCommand = `curl -s -X POST https://api.anthropic.com/v1/messages \\
-        -H "Content-Type: application/json" \\
-        -H "x-api-key: ${CONFIG.anthropic_key}" \\
-        -H "anthropic-version: 2023-06-01" \\
-        -d '${JSON.stringify(requestData)}'`;
-
-    return new Promise((resolve, reject) => {
-        exec(curlCommand, { maxBuffer: 1024 * 1024 * 10 }, (error, stdout, stderr) => {
-            if (error) {
-                reject(new Error(`Claude API Error: ${error.message}`));
-                return;
-            }
-
-            try {
-                const response = JSON.parse(stdout);
-                const content = response.content?.[0]?.text || 'Erro na conversão';
-                resolve(content);
-            } catch (parseError) {
-                reject(new Error(`Claude Response Parse Error: ${parseError.message}`));
-            }
+            }]
         });
-    });
+
+        return response.content[0].text;
+    } catch (error) {
+        if (error.status === 401) {
+            throw new Error('❌ Claude API key inválida. Verifique ANTHROPIC_API_KEY no .env');
+        }
+        if (error.status === 429) {
+            throw new Error('❌ Limite de API atingido. Tente novamente em alguns minutos.');
+        }
+        throw new Error(`❌ Claude API Error: ${error.message}`);
+    }
 }
 
 async function processWithOpenAI(extractedText) {
@@ -177,13 +170,14 @@ async function processWithOpenAI(extractedText) {
         throw new Error('❌ OPENAI_API_KEY não configurada! Configure no arquivo .env');
     }
 
-    // Limitar texto para evitar limite de tokens
-    const maxTextLength = 30000;
-    const textToProcess = extractedText.length > maxTextLength 
-        ? extractedText.slice(0, maxTextLength) + '\n\n[...texto truncado...]'
-        : extractedText;
+    try {
+        // Limitar texto para evitar limite de tokens
+        const maxTextLength = 30000;
+        const textToProcess = extractedText.length > maxTextLength 
+            ? extractedText.slice(0, maxTextLength) + '\n\n[...texto truncado...]'
+            : extractedText;
 
-    const prompt = `Converta este texto extraído de PDF para Markdown estruturado e profissional:
+        const prompt = `Converta este texto extraído de PDF para Markdown estruturado e profissional:
 
 TEXTO DO PDF:
 ${textToProcess}
@@ -200,43 +194,40 @@ INSTRUÇÕES DETALHADAS:
 
 RESPONDA APENAS COM O MARKDOWN FORMATADO SEM EXPLICAÇÕES ADICIONAIS:`;
 
-    const requestData = {
-        model: CONFIG.openai_model,
-        messages: [
-            {
-                role: "system", 
-                content: "Você é um especialista em conversão de documentos PDF para Markdown estruturado. Sempre responda apenas com o markdown formatado, sem explicações adicionais."
-            },
-            {
-                role: "user", 
-                content: prompt
-            }
-        ],
-        max_tokens: CONFIG.openai_max_tokens,
-        temperature: CONFIG.openai_temperature
-    };
-
-    const curlCommand = `curl -s -X POST https://api.openai.com/v1/chat/completions \\
-        -H "Content-Type: application/json" \\
-        -H "Authorization: Bearer ${CONFIG.openai_key}" \\
-        -d '${JSON.stringify(requestData)}'`;
-
-    return new Promise((resolve, reject) => {
-        exec(curlCommand, { maxBuffer: 1024 * 1024 * 10 }, (error, stdout, stderr) => {
-            if (error) {
-                reject(new Error(`OpenAI API Error: ${error.message}`));
-                return;
-            }
-
-            try {
-                const response = JSON.parse(stdout);
-                const content = response.choices?.[0]?.message?.content || 'Erro na conversão';
-                resolve(content);
-            } catch (parseError) {
-                reject(new Error(`OpenAI Response Parse Error: ${parseError.message}`));
+        const response = await axios.post('https://api.openai.com/v1/chat/completions', {
+            model: CONFIG.openai_model,
+            messages: [
+                {
+                    role: "system", 
+                    content: "Você é um especialista em conversão de documentos PDF para Markdown estruturado. Sempre responda apenas com o markdown formatado, sem explicações adicionais."
+                },
+                {
+                    role: "user", 
+                    content: prompt
+                }
+            ],
+            max_tokens: CONFIG.openai_max_tokens,
+            temperature: CONFIG.openai_temperature
+        }, {
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${CONFIG.openai_key}`
             }
         });
-    });
+
+        return response.data.choices[0].message.content;
+    } catch (error) {
+        if (error.response?.status === 401) {
+            throw new Error('❌ OpenAI API key inválida. Verifique OPENAI_API_KEY no .env');
+        }
+        if (error.response?.status === 429) {
+            throw new Error('❌ Limite de API atingido. Verifique seu plano OpenAI.');
+        }
+        if (error.response?.data?.error) {
+            throw new Error(`❌ OpenAI Error: ${error.response.data.error.message}`);
+        }
+        throw new Error(`❌ OpenAI API Error: ${error.message}`);
+    }
 }
 
 function processBasic(pages) {
@@ -269,6 +260,12 @@ function processBasic(pages) {
 async function convertPdfToMarkdown(pdfPath, outputPath) {
     console.log(`🔄 Converting: ${pdfPath}`);
     console.log(`📋 Method: ${CONFIG.method.toUpperCase()}`);
+    
+    // Criar diretório de output se não existir
+    const outputDir = path.dirname(outputPath);
+    if (!fs.existsSync(outputDir)) {
+        fs.mkdirSync(outputDir, { recursive: true });
+    }
     
     try {
         // 1. Extrair texto com PyMuPDF
@@ -312,6 +309,35 @@ async function convertPdfToMarkdown(pdfPath, outputPath) {
     }
 }
 
+function validateEnvironment() {
+    const errors = [];
+    
+    // Verificar se Python está disponível
+    try {
+        require('child_process').execSync('python3 --version', { stdio: 'pipe' });
+    } catch (error) {
+        errors.push('❌ Python 3 não encontrado. Instale: https://python.org/downloads');
+    }
+    
+    // Verificar se PyMuPDF está instalado
+    try {
+        require('child_process').execSync('python3 -c "import fitz"', { stdio: 'pipe' });
+    } catch (error) {
+        errors.push('❌ PyMuPDF não instalado. Execute: python3 -m pip install pymupdf');
+    }
+    
+    // Verificar configuração de API conforme método
+    if (CONFIG.method === 'openai' && !CONFIG.openai_key) {
+        errors.push('❌ OpenAI API key não configurada. Configure OPENAI_API_KEY no .env');
+    }
+    
+    if (CONFIG.method === 'claude' && !CONFIG.anthropic_key) {
+        errors.push('❌ Claude API key não configurada. Configure ANTHROPIC_API_KEY no .env');
+    }
+    
+    return errors;
+}
+
 async function main() {
     const pdfPath = process.argv[2];
     
@@ -327,9 +353,42 @@ async function main() {
         process.exit(1);
     }
     
+    // Validar extensão do arquivo
+    if (!pdfPath.toLowerCase().endsWith('.pdf')) {
+        console.error('❌ File must be a PDF (.pdf extension)');
+        process.exit(1);
+    }
+    
+    // Verificar tamanho do arquivo (limite de 50MB)
+    const stats = fs.statSync(pdfPath);
+    const fileSizeMB = stats.size / (1024 * 1024);
+    if (fileSizeMB > 50) {
+        console.error(`❌ File too large: ${fileSizeMB.toFixed(1)}MB (max: 50MB)`);
+        process.exit(1);
+    }
+    
     // Sobrescrever método via argumento
     if (process.argv[3]) {
-        CONFIG.method = process.argv[3];
+        const method = process.argv[3].toLowerCase();
+        const validMethods = ['basic', 'ollama', 'claude', 'openai'];
+        if (!validMethods.includes(method)) {
+            console.error(`❌ Invalid method: ${method}`);
+            console.error(`Valid methods: ${validMethods.join(', ')}`);
+            process.exit(1);
+        }
+        CONFIG.method = method;
+    }
+    
+    // Validar ambiente
+    const envErrors = validateEnvironment();
+    if (envErrors.length > 0) {
+        console.error('❌ Environment validation failed:');
+        envErrors.forEach(error => console.error(`  ${error}`));
+        
+        if (CONFIG.method !== 'basic') {
+            console.error('\n💡 Try using basic method: node hybrid-converter.js file.pdf basic');
+        }
+        process.exit(1);
     }
     
     const pdfName = path.basename(pdfPath, '.pdf');
@@ -351,7 +410,22 @@ async function main() {
         console.log('--- End Preview ---\n');
         
     } catch (error) {
-        console.error(`❌ Error: ${error.message}`);
+        console.error(`\n❌ Conversion failed: ${error.message}`);
+        
+        // Sugestões baseadas no tipo de erro
+        if (error.message.includes('API key')) {
+            console.error('\n💡 Solutions:');
+            console.error('  1. Check your .env file has correct API keys');
+            console.error('  2. Copy from .env.example: cp .env.example .env');
+            console.error('  3. Try basic method: node hybrid-converter.js file.pdf basic');
+        }
+        
+        if (error.message.includes('PyMuPDF') || error.message.includes('fitz')) {
+            console.error('\n💡 Install PyMuPDF:');
+            console.error('  python3 -m pip install pymupdf');
+            console.error('  # or: pip3 install pymupdf');
+        }
+        
         process.exit(1);
     }
 }
